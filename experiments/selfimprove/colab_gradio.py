@@ -28,7 +28,7 @@ the experiment — everything else talks to training math or the pool.
 import os
 import threading
 
-from . import grpo, insight_pool, offline, provider_local, teacher
+from . import grpo, insight_pool, offline, provider_local, teacher, traj
 
 try:
     from back.harness import Harness
@@ -49,6 +49,16 @@ def _system_prompt_for(workdir):
     the fixed chat workspace so SFT masks agree with what chat actually saw."""
     from back import memory
     return memory.build_system_prompt(workdir, extra=CHAT_SYSTEM_EXTRA)
+
+
+def _acting_system(harness):
+    """Exactly the system the acting provider rendered for generation:
+    harness system prompt + rendered tool block. Masking must reuse this
+    string or build_masked would segment against a *different* prefix than the
+    one the model was generated under.
+    """
+    return harness.system + traj.tool_block(
+        [t.spec for t in harness.tools.values()])
 
 
 class SelfLearn:
@@ -125,7 +135,7 @@ class SelfLearn:
                     persist=False, enable_subagents=enable_subagents)
         final = h.run(task_text)
         self._note(f"[{tag}] done in {len(h.messages)} msgs")
-        return h.messages, h.system, final
+        return h.messages, _acting_system(h), final
 
     # -- Chat tab ---------------------------------------------------------
 
