@@ -80,29 +80,43 @@ def seq_logprob(model, tok, messages, system, device):
     return (lp * msk).sum() / msk.sum().clamp(min=1), msk.sum().item()
 
 
-def grpo_step(model, tok, group, rewards, system, device, lr=DEFAULT_LR):
+def _system_of(entry, fallback):
+    """A group entry is either a *neutral transcript* (list) or a dict
+    {"messages": [...], "system": "..."}. Rollouts in the online loop run in
+    separate directories, so each carries its own harness system prompt —
+    using a single global one would mask against the wrong context.
+    """
+    if isinstance(entry, dict) and "messages" in entry:
+        return entry.get("system") or fallback, entry["messages"]
+    return fallback, entry
+
+
+def grpo_step(model, tok, group, rewards, system=None, device=None, lr=DEFAULT_LR):
     """One GRPO update: rewards -> group-relative advantages -> REINFORCE step.
 
-    `group` is a list of neutral transcripts, all from rollouts of the SAME
-    task; `rewards` aligns 1:1 with it. A greedy zero-mean group (all rewards
+    `group` is a list of rollouts of the SAME task; `rewards` aligns 1:1 with
+    it. Each rollout may be a neutral transcript or a {"messages", "system"}
+    dict (per-rollout system prompt). A greedy zero-mean group (all rewards
     equal) is the honest failure mode of a small model — reported, not
     scripted over. Returns {"loss", "grad_norm", "advantages", "logp_before",
     "logp_after"} for the notebook tables.
     """
     torch = _torch()
+    named = [{"system": s, "messages": m} for s, m in
+             (_system_of(g, system or "") for g in group)]
     rewards = torch.tensor(rewards, dtype=torch.float)
     adv = (rewards - rewards.mean()) / (rewards.std(unbiased=False) + 1e-4)
 
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
                             lr=lr)
-    logp_before = [seq_logprob(model, tok, g, system, device)[0].item()
-                   for g in group]
+    logp_before = [seq_logprob(model, tok, g["messages"], g["system"],
+                               device)[0].item() for g in named]
 
     model.train()
     opt.zero_grad(set_to_none=True)
     loss_total = 0.0
-    for g, a in zip(group, adv):
-        lp, _ = seq_logprob(model, tok, g, system, device)
+    for g, a in zip(named, adv):
+        lp, _ = seq_logprob(model, tok, g["messages"], g["system"], device)
         loss = -(a.to(device) * lp) / len(group)
         loss.backward()
         loss_total += loss.item()
@@ -111,7 +125,8 @@ def grpo_step(model, tok, group, rewards, system, device, lr=DEFAULT_LR):
         [p for p in model.parameters() if p.requires_grad], GRAD_CLIP)
     opt.step()
 
-    logp_after = [seq_logprob(model, tok, g, system, device)[0].item() for g in group]
+    logp_after = [seq_logprob(model, tok, g["messages"], g["system"],
+                              device)[0].item() for g in named]
 
     return {"loss": loss_total,
             "grad_norm": float(grad_norm),
