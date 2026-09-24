@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.DS_Store
+.odysseus/
+
+# Secrets and local tooling
+.env
+.venv/
+*.ipynb_checkpoints/
