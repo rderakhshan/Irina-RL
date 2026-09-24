@@ -7,10 +7,12 @@ messages, tools)` returning `{"text", "tool_calls", "usage"}` — so that a
 one-line swap (below) turns the harness' acting model into Qwen without
 touching a single line of `src/back/`.
 
-Unlike the DeepSeek provider, `complete` here ignores its `temperature`
-argument positionally and reads `TEMPERATURE` (module global) instead, because
-the harness calls it without one: chat wants ~0.4, GRPO rollouts want ~1.0.
-The caller flips this knob between runs.
+Unlike the DeepSeek provider, `complete` here ignores both its `temperature`
+argument and its `model` argument (read module-global `TEMPERATURE`/`DEFAULT_MODEL`
+instead), because the harness calls it with its own stored names: chat wants
+~0.4, GRPO rollouts want ~1.0, and the harness stamps every call
+`deepseek-chat` — an HTTP API name that must never be passed to a model
+loader. The caller flips the temperature knob between runs.
 
 The chat template renders the tool list into the system prompt and asks for a
 JSON tool call, exactly the contract `traj.to_chat` / `traj.parse_tool_calls`
@@ -71,11 +73,17 @@ def complete(model, system, messages, tools, temperature=None):
     """One acting turn. Same signature and return shape as the DeepSeek
     provider (back.provider.complete) so the harness runs unchanged.
 
+    The `model` argument is ignored on purpose: the harness stamps every call
+    with its own stored model name (`provider.DEFAULT_MODEL`, i.e.
+    `deepseek-chat`), and that string must NEVER reach a model loader — it is
+    an HTTP API name, not a download. This provider always acts as its own
+    fixed local model.
+
     Returns {"text", "tool_calls": [{name, args, signature}], "usage"}.
     `signature` is always None — the harness derives call specs from the tool
     schema, not from the reply.
     """
-    acting_model, tok, device = load(model)
+    acting_model, tok, device = load()
 
     # The system prompt both carries the harness' instructions AND the tool
     # catalog, rendered as JSON. Chat sampling temperature comes from the
