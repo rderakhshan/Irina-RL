@@ -18,16 +18,50 @@ The parse helpers take real API strings and are unit-testable offline; only
 `grade` / `extract_golden` touch the network.
 """
 
-try:
-    import back.provider as _provider
-    _DEEPSEEK = _provider.complete  # captured before any local-provider patch
-except Exception:                   # authoring box: no `src` on sys.path
-    _provider = None
-    _DEEPSEEK = None
+import sys
 
 from . import traj
 
-MODEL = _provider.DEFAULT_MODEL if _provider else "deepseek-chat"
+_provider = None
+_DEEPSEEK = None
+MODEL = "deepseek-chat"
+
+
+def _capture():
+    """(Re-)bind the DeepSeek `complete` from `src/back`, if it is on the
+    path. Must run BEFORE `provider_local.install_provider()` swaps in Qwen,
+    or the teacher would judge with its own student. Returns bound: bool."""
+    global _provider, _DEEPSEEK, MODEL
+    try:
+        import back.provider as p
+        _provider, _DEEPSEEK = p, p.complete
+        MODEL = _provider.DEFAULT_MODEL if _provider else "deepseek-chat"
+        return _DEEPSEEK is not None
+    except Exception:           # authoring box / `src` not yet on sys.path
+        _provider, _DEEPSEEK = None, None
+        return False
+
+
+_capture()
+
+
+def rebind():
+    """Re-capture DeepSeek after the bootstrap fixed `sys.path`. Call this from
+    the notebook if section 5 reports the teacher unbound."""
+    ok = _capture()
+    if not ok:
+        print("teacher.rebind(): `back` still not importable — check that "
+              "REPO_DIR/src is on sys.path", file=sys.stderr)
+    return ok
+
+
+_warned = {"none": False, "error": False}
+
+
+def binding():
+    """Diagnostic summary for the UI / notebook."""
+    return {"bound": _DEEPSEEK is not None, "model": MODEL,
+            "via": (getattr(_provider, "__name__", "") if _provider else "")}
 
 JUDGE_SYSTEM = """You are a rigorous, economical grader of a coding agent's
 work. You read a transcript of an agent using tools (reading files, running
@@ -87,20 +121,62 @@ def parse_golden(text):
     return cleaned or None
 
 
-def grade(messages):
-    """Judge one trajectory -> float in [0, 10]. Falls back to 0 when the
-    judge is unavailable (no DeepSeek key / network), so callers can count on
-    always getting a number.
-    """
+def _bound_or_warn():
+    """Ensure the teacher is bound; if not, warn once and return False."""
     if _DEEPSEEK is None:
+        if not _warned["none"]:
+            _warned["none"] = True
+            print("teacher: NOT bound to DeepSeek (back.provider was not "
+                  "importable at import time). Every grade returns 0 and "
+                  "nothing banks. Run the notebook section 5 cell, then "
+                  "teacher.rebind() before install_provider().",
+                  file=sys.stderr)
+        return False
+    return True
+
+
+def _guard_reply(reply, what, request_text):
+    """Wrap the single external call so a DeepSeek outage is a loud visible
+    message, not a silent 0.0 or a UI-window crash."""
+    if _DEEPSEEK is None:
+        _bound_or_warn()
+        return None
+    try:
+        return _DEEPSEEK(MODEL, what,
+                         [{"role": "user", "text": request_text}], [])
+    except Exception as e:      # network/key error: surface, don't fake 0
+        if not _warned["error"]:
+            _warned["error"] = True
+            print(f"teacher: DeepSeek call failed ({e!r}) — grades/extracts "
+                  f"will be 0/none until it recovers", file=sys.stderr)
+        return None
+
+
+def _user_request(messages):
+    """The boxed request the judge reads. Never touches the network."""
+    boxed = ([m for m in messages if m.get("role") == "user"] or messages
+             or [])[0]
+    text = boxed.get("text", "") if boxed else ""
+    return (f"USER REQUEST:\n{text}\n\n"
+            f"TRANSCRIPT:\n{_transcript_text(messages)}")
+
+
+def grade(messages):
+    """Judge one trajectory -> float in [0, 10]. Returns 0 when the judge is
+    unavailable (no DeepSeek key / network), with a loud stderr warning the
+    first time, so callers can count on a number AND see why it's a 0."""
+    if not _bound_or_warn():
         return 0.0
-    reply = _DEEPSEEK(MODEL, JUDGE_SYSTEM,
-                      [{"role": "user",
-                        "text": f"USER REQUEST:\n{messages[0].get('text','')}"
-                                f"\n\nTRANSCRIPT:\n{_transcript_text(messages)}"}],
-                      [])
+    reply = _guard_reply(messages, JUDGE_SYSTEM, _user_request(messages))
+    if reply is None:
+        return 0.0
     score = parse_grade(reply["text"])
-    return score if score is not None else 0.0
+    if score is None:
+        print("teacher: judge reply carried no parseable `SCORE n` — "
+              f"had nothing to grade on; reply: {reply['text'][:120]!r}",
+              file=sys.stderr)
+        return 0.0
+    return score
 
 
 def extract_golden(issue, messages):
@@ -108,12 +184,13 @@ def extract_golden(issue, messages):
     trace text. Returns None when the teacher is unavailable or the extract
     came back empty (caller then skips banking).
     """
-    if _DEEPSEEK is None:
+    if not _bound_or_warn():
         return None
     request = (f"USER REQUEST:\n{issue}\n\n"
                f"TRANSCRIPT:\n{_transcript_text(messages)}")
-    reply = _DEEPSEEK(MODEL, GOLDEN_SYSTEM,
-                      [{"role": "user", "text": request}], [])
+    reply = _guard_reply(messages, GOLDEN_SYSTEM, request)
+    if reply is None:
+        return None
     trace = parse_golden(reply["text"])
     if not trace:
         return None

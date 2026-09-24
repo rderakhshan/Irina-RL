@@ -30,10 +30,19 @@ import threading
 
 from . import grpo, insight_pool, offline, provider_local, teacher, traj
 
-try:
-    from back.harness import Harness
-except Exception:  # authoring box has no `src` on sys.path (and no torch)
-    Harness = None
+_HARNESS = None     # resolved on first use, so a late sys.path fix is honored
+
+
+def _harness():
+    """Resolve `back.harness.Harness` lazily. Resolving at import time cached
+    a `None` forever when `src` wasn't on sys.path yet; resolving here means a
+    late bootstrap fix (e.g. the notebook's section-2 self-bootstrap) works."""
+    global _HARNESS
+    if _HARNESS is None:
+        from back.harness import Harness
+        _HARNESS = Harness
+    return _HARNESS
+
 
 DEFAULT_GROUP_SIZE = 6       # GRPO rollouts per online task
 DEFAULT_MAX_TURNS = 4        # short episodes: small window, no compaction
@@ -97,7 +106,9 @@ class SelfLearn:
         self._task_index = 0
         self._last_chat = None
 
-        if Harness is None:
+        try:
+            _harness()
+        except Exception:
             self._note("warning: back.harness not importable here — "
                        "this box has no `src` on sys.path (or no torch).")
 
@@ -126,13 +137,11 @@ class SelfLearn:
     def _run_harness(self, workdir, task_text, budget_tokens, temperature,
                      max_turns, enable_subagents=False, tag=""):
         """One rollout in `workdir`. Returns (messages, system, final_text)."""
-        if Harness is None:
-            raise RuntimeError("back.harness is not importable in this environment")
         provider_local.TEMPERATURE = temperature
-        h = Harness(workdir=workdir, model=self.model_name,
-                    system_extra=CHAT_SYSTEM_EXTRA,
-                    budget_tokens=budget_tokens, max_turns=max_turns,
-                    persist=False, enable_subagents=enable_subagents)
+        h = _harness()(workdir=workdir, model=self.model_name,
+                       system_extra=CHAT_SYSTEM_EXTRA,
+                       budget_tokens=budget_tokens, max_turns=max_turns,
+                       persist=False, enable_subagents=enable_subagents)
         final = h.run(task_text)
         self._note(f"[{tag}] done in {len(h.messages)} msgs")
         return h.messages, _acting_system(h), final
@@ -141,13 +150,18 @@ class SelfLearn:
 
     def chat(self, issue):
         """Run one live session with the student; on close, bank its golden."""
-        messages, _, final = self._run_harness(
-            self.chat_dir, issue, CHAT_BUDGET, 0.4, 120,
-            enable_subagents=True, tag="chat")
-        self._last_chat = (issue, final)
-        bank = self.pool.bank(issue, messages)
-        self._note(bank)
-        return final, bank, self.status_text()
+        try:
+            messages, _, final = self._run_harness(
+                self.chat_dir, issue, CHAT_BUDGET, 0.4, 120,
+                enable_subagents=True, tag="chat")
+            self._last_chat = (issue, final)
+            bank = self.pool.bank(issue, messages)
+            self._note(bank)
+            return final, bank, self.status_text()
+        except Exception as e:
+            # Never a silent no-op: the UI should SEE the failure.
+            self._note(f"[chat] ERROR: {e!r}")
+            return (f"Error: {e}", f"chat failed — see `{e}`", self.status_text())
 
     # -- Offline tab --------------------------------------------------------
 
@@ -159,19 +173,23 @@ class SelfLearn:
 
     def offline_apply(self):
         """Drain the pool and SFT the student on the collected goldens."""
-        goldens = self.pool.drain()
-        if not goldens:
-            self._note("offline: pool empty — nothing to learn from")
-            return "Pool is empty. Close a few chat sessions first.",
-        model, tok, device = self._trainable()
-        self._note(f"offline: sft on {len(goldens)} goldens")
-        result = offline.sft_step(model, tok, goldens, system=self._chat_system,
-                                  device=device)
-        self._note(f"offline: loss {result['loss_before']}→"
-                   f"{result['loss_after']} over {result['examples']} examples")
-        return (f"Done: {result['examples']} goldens, cross-entropy "
-                f"{result['loss_before']} → {result['loss_after']}."), \
-               self.status_text()
+        try:
+            goldens = self.pool.drain()
+            if not goldens:
+                self._note("offline: pool empty — nothing to learn from")
+                return "Pool is empty. Close a few chat sessions first.",
+            model, tok, device = self._trainable()
+            self._note(f"offline: sft on {len(goldens)} goldens")
+            result = offline.sft_step(model, tok, goldens,
+                                      system=self._chat_system, device=device)
+            self._note(f"offline: loss {result['loss_before']}→"
+                       f"{result['loss_after']} over {result['examples']} examples")
+            return (f"Done: {result['examples']} goldens, cross-entropy "
+                    f"{result['loss_before']} → {result['loss_after']}."), \
+                   self.status_text()
+        except Exception as e:
+            self._note(f"[offline] ERROR: {e!r}")
+            return f"Error: {e}", self.status_text()
 
     # -- Online tab ----------------------------------------------------------
 
@@ -189,7 +207,11 @@ class SelfLearn:
     def _online_loop(self):
         from . import tasks
         catalog = tasks.catalog()
-        model, tok, device = self._trainable()
+        try:
+            model, tok, device = self._trainable()
+        except Exception as e:
+            self._note(f"[online] cannot start: {e!r}")
+            return
         while not self.stop_online.is_set():
             task = catalog[self._task_index % len(catalog)]
             self._task_index += 1
@@ -199,23 +221,35 @@ class SelfLearn:
             group, rewards = [], []
             for i in range(self.group_size):
                 workdir = tasks.materialize(task, root)
-                messages, system, _ = self._run_harness(
-                    workdir, task["task"], ROLLOUT_BUDGET, 1.0, self.max_turns,
-                    enable_subagents=False, tag=f"{task['id']}#{i}")
+                try:
+                    messages, system, _ = self._run_harness(
+                        workdir, task["task"], ROLLOUT_BUDGET, 1.0,
+                        self.max_turns, enable_subagents=False,
+                        tag=f"{task['id']}#{i}")
+                except Exception as e:
+                    self._note(f"[online] {task['id']}#{i} rollout failed: "
+                               f"{e!r}")
+                    continue
                 group.append({"messages": messages, "system": system})
                 rewards.append(teacher.grade(messages))
 
+            if not group:
+                self._note("[online] no rollouts this round — retrying")
+                continue
             if grpo.degenerate(rewards):
                 self._note(f"[online] {task['id']}: rewards {rewards} all "
                            "equal — no signal, step skipped")
                 continue
 
-            step = grpo.grpo_step(model, tok, group, rewards, system=None,
-                                  device=device)
-            self._note(f"[online] {task['id']}: "
-                       f"rewards={step['rewards']} "
-                       f"adv={step['advantages']} loss={step['loss']:.3f} "
-                       f"grad={step['grad_norm']:.2f}")
+            try:
+                step = grpo.grpo_step(model, tok, group, rewards,
+                                      system=None, device=device)
+                self._note(f"[online] {task['id']}: "
+                           f"rewards={step['rewards']} "
+                           f"adv={step['advantages']} loss={step['loss']:.3f} "
+                           f"grad={step['grad_norm']:.2f}")
+            except Exception as e:
+                self._note(f"[online] {task['id']} step failed: {e!r}")
 
     # -- Status -------------------------------------------------------------
 
@@ -223,8 +257,11 @@ class SelfLearn:
         st = self.pool.status()
         online = self.online_thread and self.online_thread.is_alive()
         model = getattr(provider_local, "_LOADED", {}).get("name") or self.model_name
+        tb = teacher.binding()
+        bound = "DeepSeek bound" if tb["bound"] else "**UNBOUND — grades will be 0**"
         lines = [
             f"**model:** {model}",
+            f"**teacher:** {bound}",
             f"**pool:** {st['count']}/{st['threshold']} "
             f"({'ready' if st['ready'] else 'collecting…'})",
             f"**lora:** {'attached' if self.lora else 'not yet'}",
