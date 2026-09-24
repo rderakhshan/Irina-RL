@@ -127,3 +127,29 @@ a way around either — and never write a session file of their own, so
 
 None of that makes an agent safe to point at a directory you care about. Run it
 on a copy, or in a container, and read what it did.
+
+---
+
+# Irina-RL
+
+A self-improvement experiment built on this harness: the same ten-file agent,
+but its acting model is a small local `Qwen2.5-Coder-0.5B`, and a DeepSeek
+teacher grades its transcripts so it can learn from its own work.
+
+- **Online loop (GRPO):** sample a small group of rollouts of one task, score
+  each transcript with the DeepSeek judge, take one group-relative-advantage
+  REINFORCE step on the assistant-token log-probs.
+- **Offline loop (SFT):** when a chat session closes, the teacher distills its
+  best run into a "golden reasoning trace"; once enough goldens accumulate in
+  the insight pool, one button drains the pool into an imitation step.
+- **The invariant:** nothing in `src/back/` changes except a single temperature
+  parameter. The harness keeps speaking its neutral `user / assistant / tool`
+  message format; `provider_local.py` presents the same `complete(...)`
+  signature, so a one-line monkey-patch swaps DeepSeek for Qwen under a running
+  harness, and `teacher.py` binds the real DeepSeek door at import time so it
+  can never grade with its own student.
+
+Everything lives in `experiments/selfimprove/`, runs from the Colab notebook
+`colab_selfimprove.ipynb` (section by section, fresh T4), and is driven by a
+Gradio app with chat / offline / online tabs. The full roadmap and per-stage
+checklist are in [PLAN.md](PLAN.md).

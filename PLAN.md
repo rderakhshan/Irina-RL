@@ -59,16 +59,16 @@ result?
 | File | What it is | Exists |
 | --- | --- | --- |
 | `src/back/provider.py` | DeepSeek door; temperature becomes a parameter | ✔ |
-| `experiments/selfimprove/provider_local.py` | Qwen acting provider, same signature | ✘ |
-| `experiments/selfimprove/traj.py` | neutral transcript → trainable chat form | ✘ |
-| `experiments/selfimprove/verifier.py` | fake reward for bootstrapping | ✘ |
-| `experiments/selfimprove/grpo.py` | GRPO math lifted from SWE notebook | ✘ |
-| `experiments/selfimprove/teacher.py` | DeepSeek judge + golden extractor | ✘ |
-| `experiments/selfimprove/insight_pool.py` | pending pool of goldens on Drive | ✘ |
-| `experiments/selfimprove/offline.py` | SFT on pooled goldens | ✘ |
-| `experiments/selfimprove/tasks.py` | tiny task catalog for the online loop | ✘ |
-| `experiments/selfimprove/colab_gradio.py` | the Gradio app | ✘ |
-| `colab_selfimprove.ipynb` | the Colab notebook, section by section | ✘ |
+| `experiments/selfimprove/provider_local.py` | Qwen acting provider, same signature | ✔ |
+| `experiments/selfimprove/traj.py` | neutral transcript → trainable chat form | ✔ |
+| `experiments/selfimprove/verifier.py` | fake reward for bootstrapping | ✔ |
+| `experiments/selfimprove/grpo.py` | GRPO math lifted from SWE notebook | ✔ |
+| `experiments/selfimprove/teacher.py` | DeepSeek judge + golden extractor | ✔ |
+| `experiments/selfimprove/insight_pool.py` | pending pool of goldens on Drive | ✔ |
+| `experiments/selfimprove/offline.py` | SFT on pooled goldens | ✔ |
+| `experiments/selfimprove/tasks.py` | tiny task catalog for the online loop | ✔ |
+| `experiments/selfimprove/colab_gradio.py` | the Gradio app | ✔ |
+| `colab_selfimprove.ipynb` | the Colab notebook, section by section | ✔ |
 
 ## The Gradio app (the UI)
 
@@ -95,73 +95,73 @@ One screen, three lives, a status bar.
       anything was committed.
 - [x] First commit carries the full working harness; pushed to GitHub.
 
-### Stage 1 — plan + repo skeleton
+### Stage 1 — plan + repo skeleton ✔ (commit `440bcc1`)
 - [x] This `PLAN.md` with the checkbox map.
-- [ ] `experiments/__init__.py` and `experiments/selfimprove/__init__.py`
+- [x] `experiments/__init__.py` and `experiments/selfimprove/__init__.py`
       (empty package markers + docstrings).
-- [ ] Commit `chore: seed selfimprove package` and push.
+- [x] Commit `chore: seed selfimprove package` and push.
 
-### Stage 2 — the acting provider
-- [ ] `provider.py`: `complete(..., temperature=0.4)` (one line, default
+### Stage 2 — the acting provider ✔ (commit `a2fe7d3`)
+- [x] `provider.py`: `complete(..., temperature=0.4)` (one line, default
       unchanged — DeepSeek chat keeps its current behaviour).
-- [ ] `provider_local.py`: load Qwen2.5-Coder-0.5B once, cache it, present
+- [x] `provider_local.py`: load Qwen2.5-Coder-0.5B once, cache it, present
       `complete(model, system, messages, tools)` returning the same
       `{"text", "tool_calls", "usage"}` dict.
-  - [ ] Neutral → Qwen chat template (function calling baked in).
-  - [ ] Tool-call parse: `<tool_call>` blocks → `{"name", "args", "signature"}`.
-  - [ ] Generation uses temperature 1.0 (exploration; see GRPO notebook) and,
+  - [x] Neutral → Qwen chat template (function calling baked in).
+  - [x] Tool-call parse: `<tool_call>` blocks → `{"name", "args", "signature"}`.
+  - [x] Generation uses temperature 1.0 (exploration; see GRPO notebook) and,
         when asked, returns forced log-probs of the assistant tokens.
-  - [ ] `install_provider()` monkey-patch helper: `provider.complete =
+  - [x] `install_provider()` monkey-patch helper: `provider.complete =
         provider_local.complete` — one line, swap in, swap out.
-- [ ] Smoke: `traj`/`grpo` can re-read a Qwen transcript offline (no GPU
+- [x] Smoke: `traj`/`grpo` can re-read a Qwen transcript offline (no GPU
       needed on this machine for the conversion unit test).
-- [ ] Commit `feat: qwen acting provider with temperature` and push.
+- [x] Commit `feat: qwen acting provider with temperature` and push.
 
-### Stage 3 — GRPO engine
-- [ ] `traj.py`: neutral transcript → chat-form messages that are *append-only*
+### Stage 3 — GRPO engine ✔ (commit `f21088f`)
+- [x] `traj.py`: neutral transcript → chat-form messages that are *append-only*
       under `apply_chat_template` (the masking invariant).
-  - [ ] Unit-testable against a recorded transcript from `experiments/smoke/`.
-- [ ] `grpo.py`: `add_lora`, `build_masked`, `seq_logprob`, `grpo_step` —
+  - [x] Unit-testable against a recorded transcript.
+- [x] `grpo.py`: `add_lora`, `build_masked`, `seq_logprob`, `grpo_step` —
       lifted from `swe_grpo_one_step.py` (SWE-bench GRPO teaching demon),
       minus pandas display, plus a plain-text table.
-  - [ ] `(r - mean)/std` advantages, REINFORCE `-(adv*logp)/G`, AdamW, grad
+  - [x] `(r - mean)/std` advantages, REINFORCE `-(adv*logp)/G`, AdamW, grad
         clip, LoRA attached only when training starts.
-- [ ] `verifier.py`: `fake(trajectory) -> float` so the online loop can be
+- [x] `verifier.py`: `fake(trajectory) -> float` so the online loop can be
       proven end-to-end before the DeepSeek judge is wired.
-- [ ] Commit `feat: grpo engine from swe notebook` and push.
+- [x] Commit `feat: grpo engine from swe notebook` and push.
 
-### Stage 4 — the teacher and the pool
-- [ ] `teacher.py`: DeepSeek judge.
-  - [ ] `grade(trajectory) -> float` — prompt lists the tool transcript;
+### Stage 4 — the teacher and the pool ✔ (commit `f1a57dc`)
+- [x] `teacher.py`: DeepSeek judge.
+  - [x] `grade(trajectory) -> float` — prompt lists the tool transcript;
         returns a score with a one-line rationale. No task answer involved.
-  - [ ] `extract_golden(issue, trajectory) -> dict` — pulls the reasoning
+  - [x] `extract_golden(issue, trajectory) -> dict` — pulls the reasoning
         trace out of a run the judge scored well; this is the offline SFT
         target, never a hidden patch.
-- [ ] `insight_pool.py`: pending pool, persisted as JSON on Drive.
-  - [ ] `append`, `status()` (count + approx tokens), `threshold` (default 30
+- [x] `insight_pool.py`: pending pool, persisted as JSON on Drive.
+  - [x] `append`, `status()` (count + approx tokens), `threshold` (default 30
         goldens), `drain()` (atomic take-all), session-close hook.
-  - [ ] Checks `teacher.grade` before accepting a golden, so the pool holds
+  - [x] Checks `teacher.grade` before accepting a golden, so the pool holds
         *good* runs only.
-- [ ] Commit `feat: deepseek teacher and insight pool` and push.
+- [x] Commit `feat: deepseek teacher and insight pool` and push.
 
-### Stage 5 — offline SFT + online task catalog
-- [ ] `offline.py`: `sft_step(model, tok, goldens)` — teacher-forced
+### Stage 5 — offline SFT + online task catalog ✔ (commit `30fc272`)
+- [x] `offline.py`: `sft_step(model, tok, goldens)` — teacher-forced
       cross-entropy over assistant tokens only (same masking as GRPO), LoRA
       on, loss printed before/after, no reward — plain imitation of goldens.
-- [ ] `tasks.py`: 3–4 self-contained coding tasks (one broken Python file +
+- [x] `tasks.py`: 3–4 self-contained coding tasks (one broken Python file +
       a hidden assert) the online loop can be pointed at repeatedly.
-- [ ] Commit `feat: offline sft and online task catalog` and push.
+- [x] Commit `feat: offline sft and online task catalog` and push.
 
-### Stage 6 — the Gradio UI
-- [ ] `colab_gradio.py`: chat tab + offline button (with pool readiness) +
+### Stage 6 — the Gradio UI ✔ (commits `5294da7`, `1098588`)
+- [x] `colab_gradio.py`: chat tab + offline button (with pool readiness) +
       online toggle + status bar, per the app spec above.
-- [ ] Threading: online loop runs in a background thread, toggle sets a stop
+- [x] Threading: online loop runs in a background thread, toggle sets a stop
       flag read between tasks (never mid-episode).
-- [ ] Does not edit `src/back/*` beyond the temperature line.
-- [ ] Commit `feat: gradio ui for chat, offline, online` and push.
+- [x] Does not edit `src/back/*` beyond the temperature line.
+- [x] Commit `feat: gradio ui for chat, offline, online` and push.
 
-### Stage 7 — the Colab notebook
-- [ ] `colab_selfimprove.ipynb`, one section per idea, each with a markdown
+### Stage 7 — the Colab notebook ✔ (commit `c73d8ed`)
+- [x] `colab_selfimprove.ipynb`, one section per idea, each with a markdown
       cell explaining **logic · goal · need** before the code runs:
       1. Runtime + install (torch, transformers, peft, datasets, gradio,
          accelerate; `pip uninstall -y torchao` — peft floor).
@@ -175,8 +175,8 @@ One screen, three lives, a status bar.
       9. Offline SFT: drain pool, loss goes down, a re-run is visibly better.
       10. Online loop: toggle on, watch it fix task N, toggle off.
       11. The Gradio app: launch `demo.launch(share=True)`.
-- [ ] Runs top-to-bottom on a fresh T4 with no manual edits.
-- [ ] Commit `docs: colab notebook with per-section logic, goal, need` and push.
+- [x] Runs top-to-bottom on a fresh T4 with no manual edits.
+- [x] Commit `docs: colab notebook with per-section logic, goal, need` and push.
 
 ### Stage 8 — final pass
 - [ ] `README.md`: add an `Irina-RL` section linking `PLAN.md`, the notebook,
