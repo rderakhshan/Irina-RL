@@ -37,7 +37,7 @@ def api_key():
     return key
 
 
-def complete(model, system, messages, tools):
+def complete(model, system, messages, tools, temperature=0.4):
     """Send one request to the model and return a normalised reply.
 
     `messages` uses the neutral format described in `_to_wire`; `tools` is a
@@ -46,7 +46,7 @@ def complete(model, system, messages, tools):
     """
     body = {"model": model,
             "messages": _with_system(system, _to_wire(messages)),
-            "temperature": 0.4,
+            "temperature": temperature,
             "max_tokens": MAX_OUTPUT_TOKENS}
     if tools:
         body["tools"] = [{"type": "function", "function": t["schema"]}
