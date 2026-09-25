@@ -5,10 +5,11 @@ training math and no judging logic, because those live in `grpo`, `offline`,
 `teacher` and `insight_pool`. Its one job is to wire four harness-scale
 actions to buttons and text boxes:
 
-  - **Chat**    — one streaming session (Qwen acting, temp ~0.4): answers
-                 appear as the model settles, and tool-less Q&A is never sent
-                 to the DeepSeek judge; sessions that used tools get graded
-                 and, when good, banked into the insight pool.
+  - **Chat**    — two buttons. *Ask the student* is a pure Q&A with the acting
+                 model (no tools, no grading, nothing banked) — use it to test
+                 the student's improvements directly. *Collect a session* runs
+                 a full agent rollout (tools), grades it with DeepSeek, and
+                 banks good goldens into the insight pool for offline SFT.
   - **Offline** — drain the pool and fine-tune on the collected goldens (the
                  button shows readiness and always works; it never blocks).
   - **Online**  — a background loop that rolls out one fixed task per
@@ -151,15 +152,25 @@ class SelfLearn:
 
     # -- Chat tab ---------------------------------------------------------
 
-    def chat(self, issue):
-        """One interactive session, STREAMED: the UI shows progress lines as
-        the agent works and the answer appears the moment the model settles,
-        not only after the whole pipeline finishes.
+    def ask(self, issue):
+        """Pure Q&A with the acting student: one model call, no tools, no
+        judge, nothing banked. This is how you test the student's improvements
+        (it already speaks through the trained LoRA head when one is attached)."""
+        try:
+            yield "(thinking…)", self.status_text()
+            provider_local.TEMPERATURE = 0.4
+            reply = provider_local.complete(
+                self.model_name, self._chat_system,
+                [{"role": "user", "text": issue}], [], temperature=0.4)
+            yield reply["text"], self.status_text()
+        except Exception as e:
+            self._note(f"[ask] ERROR: {e!r}")
+            yield (f"Error: {e}", self.status_text())
 
-        Tool-less sessions (a plain Q&A like "introduce yourself") are shown
-        immediately and skipped by the DeepSeek judge — there is nothing to
-        learn from pure chat, and grading would just block the reply.
-        """
+    def collect(self, issue):
+        """One full agent session, STREAMED: a training-data rollout with
+        tools, judged by DeepSeek, banked when good. This is the learning
+        path — it intentionally does NOT run for plain Q&A."""
         try:
             yield ("(running the acting agent…)", "—", self.status_text())
             messages, _, final = self._run_harness(
@@ -186,8 +197,9 @@ class SelfLearn:
             yield final, bank, self.status_text()
         except Exception as e:
             # Never a silent no-op: the UI should SEE the failure.
-            self._note(f"[chat] ERROR: {e!r}")
-            yield (f"Error: {e}", f"chat failed — see `{e}`", self.status_text())
+            self._note(f"[collect] ERROR: {e!r}")
+            yield (f"Error: {e}", f"session failed — see `{e}`",
+                   self.status_text())
 
     # -- Offline tab --------------------------------------------------------
 
@@ -308,15 +320,24 @@ def build_app(workdir=".", pool_path=None, **kwargs):
         status = gr.Markdown(app.status_text())
 
         with gr.Tab("Chat with the student"):
+            gr.Markdown(
+                "**Ask the student** = pure Q&A with the acting model "
+                "(no tools, nothing graded/banked) — use it to test its "
+                "improvements. **Collect a session** = a full agent rollout "
+                "that DeepSeek grades and, if good, banks as a golden for "
+                "offline SFT.")
             issue = gr.Textbox(label="Ask the acting agent to do something",
                                lines=3, placeholder="Fix the bug in dice.py …")
             answer = gr.Markdown()
             bank_line = gr.Markdown()
             with gr.Row():
-                send = gr.Button("Run session")
+                ask = gr.Button("Ask the student (Q&A)")
+                collect = gr.Button("Collect a session (learning)")
                 clear = gr.Button("Clear")
-            send.click(app.chat, inputs=issue,
-                       outputs=[answer, bank_line, status])
+            ask.click(app.ask, inputs=issue,
+                      outputs=[answer, status])
+            collect.click(app.collect, inputs=issue,
+                          outputs=[answer, bank_line, status])
             clear.click(lambda: ("", ""), outputs=[answer, bank_line])
 
         with gr.Tab("Offline learning"):
