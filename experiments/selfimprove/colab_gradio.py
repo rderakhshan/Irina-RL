@@ -271,7 +271,7 @@ class SelfLearn:
                     goldens.append(golden)
                 except Exception as ex:
                     reasons[f"error {ex!r}"] = reasons.get(f"error {ex!r}", 0) + 1
-            self.history.set_processed([e["ts"] for e in entries])
+            self.history.mark_processed([e["ts"] for e in entries])
 
             if not goldens:
                 self._note(f"offline-history: none accepted {dict(reasons)}")
@@ -299,7 +299,8 @@ class SelfLearn:
             goldens = self.pool.drain()
             if not goldens:
                 self._note("offline: pool empty — nothing to learn from")
-                return "Pool is empty. Close a few chat sessions first.",
+                return ("Pool is empty. Close a few chat sessions first.",
+                        self.status_text())
             model, tok, device = self._trainable()
             self._note(f"offline: sft on {len(goldens)} goldens")
             result = offline.sft_step(model, tok, goldens,
