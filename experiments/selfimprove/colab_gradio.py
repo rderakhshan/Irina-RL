@@ -28,10 +28,12 @@ The two `run` paths below are the only place the harness is even mentioned in
 the experiment — everything else talks to training math or the pool.
 """
 
+import json
 import os
 import threading
+import time
 
-from . import grpo, insight_pool, offline, provider_local, teacher, traj
+from . import chat_history, grpo, insight_pool, offline, provider_local, teacher, traj
 
 _HARNESS = None     # resolved on first use, so a late sys.path fix is honored
 
@@ -99,6 +101,8 @@ class SelfLearn:
         self.pool = insight_pool.InsightPool(
             pool_path or os.path.join(self.workdir, "insight_pool.json"),
             teacher=teacher)
+        self.history = chat_history.ChatHistory(
+            os.path.join(self.workdir, "chat_history.jsonl"))
         self.lora = None            # trained (PEFT) head, attached once
         self.device = None
         self.tokenizer = None
@@ -150,6 +154,18 @@ class SelfLearn:
         self._note(f"[{tag}] done in {len(h.messages)} msgs")
         return h.messages, _acting_system(h), final
 
+    def _persist(self, kind, issue, messages, answer):
+        """Save one session into the chat history (raw transcript log). The
+        transcript is the offline-history mode's input; it is deliberately NOT
+        gated here — the gate is applied later, in one batch, at apply time."""
+        self.history.append({
+            "ts": time.time(),
+            "kind": kind,
+            "issue": issue,
+            "messages": messages,
+            "answer": answer,
+        })
+
     # -- Chat tab ---------------------------------------------------------
 
     def ask(self, issue):
@@ -162,6 +178,10 @@ class SelfLearn:
             reply = provider_local.complete(
                 self.model_name, self._chat_system,
                 [{"role": "user", "text": issue}], [], temperature=0.4)
+            self._persist("ask", issue, [
+                {"role": "user", "text": issue},
+                {"role": "assistant", "text": reply["text"]},
+            ], reply["text"])
             yield reply["text"], self.status_text()
         except Exception as e:
             self._note(f"[ask] ERROR: {e!r}")
@@ -176,6 +196,7 @@ class SelfLearn:
             messages, _, final = self._run_harness(
                 self.chat_dir, issue, CHAT_BUDGET, 0.4, CHAT_MAX_TURNS,
                 enable_subagents=False, tag="chat")
+            self._persist("collect", issue, messages, final)
 
             used_tools = bool(messages and any(
                 m.get("tool_calls") for m in messages
@@ -208,6 +229,69 @@ class SelfLearn:
         return (f"**{st['count']}/{st['threshold']} goldens** "
                 f"({'ready' if st['ready'] else 'keep collecting…'}, "
                 f"~{st['tokens']} words in pool)")
+
+    def history_status(self):
+        hst = self.history.stats()
+        return (f"**history:** {hst['all']} chats stored, "
+                f"{hst['pending']} not yet learned, "
+                f"~{hst['words']} words of transcripts")
+
+    def offline_history(self):
+        """Offline learning ON YOUR CHAT HISTORY: drain every unprocessed
+        stored trace, run each through the same DeepSeek gate (grade >=
+        MIN_SCORE, then golden distillation) in a batch, and take ONE SFT step
+        on whatever passes. Every attempted trace is marked processed so nothing
+        is ever re-judged (or re-billed) twice."""
+        try:
+            entries = self.history.pending()
+            if not entries:
+                self._note("offline-history: no unprocessed chat traces")
+                return ("No unprocessed chats in history. Run a few sessions "
+                        "first, then come back."), self.status_text()
+            self._note(f"offline-history: judging {len(entries)} traces "
+                       "with DeepSeek…")
+            goldens, reasons = [], {}
+            for e in entries:
+                msgs = e.get("messages") or []
+                if not msgs:
+                    reasons["no transcript"] = \
+                        reasons.get("no transcript", 0) + 1
+                    continue
+                try:
+                    score = teacher.grade(msgs)
+                    if score < self.pool.min_score:
+                        key = f"scored {score:.1f}"
+                        reasons[key] = reasons.get(key, 0) + 1
+                        continue
+                    golden = teacher.extract_golden(e.get("issue", ""), msgs)
+                    if golden is None:
+                        reasons["no golden distilled"] = \
+                            reasons.get("no golden distilled", 0) + 1
+                        continue
+                    goldens.append(golden)
+                except Exception as ex:
+                    reasons[f"error {ex!r}"] = reasons.get(f"error {ex!r}", 0) + 1
+            self.history.set_processed([e["ts"] for e in entries])
+
+            if not goldens:
+                self._note(f"offline-history: none accepted {dict(reasons)}")
+                return (f"None of {len(entries)} traces passed the gate "
+                        f"({dict(reasons)}). Try sessions that have a concrete "
+                        f"fix target."), self.status_text()
+
+            model, tok, device = self._trainable()
+            result = offline.sft_step(model, tok, goldens,
+                                      system=self._chat_system, device=device)
+            self._note("offline-history: sft on "
+                       f"{result['examples']}/{len(entries)} traces, loss "
+                       f"{result['loss_before']}→{result['loss_after']}")
+            return (f"Done: trained on {result['examples']} of "
+                    f"{len(entries)} stored chats; cross-entropy "
+                    f"{result['loss_before']} → {result['loss_after']}. "
+                    f"Skipped: {dict(reasons)}"), self.status_text()
+        except Exception as e:
+            self._note(f"[offline-history] ERROR: {e!r}")
+            return f"Error: {e}", self.status_text()
 
     def offline_apply(self):
         """Drain the pool and SFT the student on the collected goldens."""
@@ -341,13 +425,27 @@ def build_app(workdir=".", pool_path=None, **kwargs):
             clear.click(lambda: ("", ""), outputs=[answer, bank_line])
 
         with gr.Tab("Offline learning"):
+            gr.Markdown(
+                "Two sources of training material. **Pooled goldens** = "
+                "sessions you deliberately 'collected', distilled by DeepSeek "
+                "when they scored well. **Chat history** = every chat you've "
+                "had with the student (asks and collects are autosaved here); "
+                "applying runs the whole history through the same DeepSeek "
+                "gate in one batch, then SFTs on what passes. "
+                "Processed traces are never re-judged.")
             pool_line = gr.Markdown()
+            history_line = gr.Markdown()
             with gr.Row():
                 pool_state = gr.Button("Show pool status")
-                learn = gr.Button("Apply offline learning (SFT on pooled goldens)")
+                hist_state = gr.Button("Show chat-history status")
             out = gr.Markdown()
+            with gr.Row():
+                learn = gr.Button("Apply offline learning (SFT on pooled goldens)")
+                learn_hist = gr.Button("Apply offline learning on chat history")
             pool_state.click(app.offline_status, outputs=pool_line)
+            hist_state.click(app.history_status, outputs=history_line)
             learn.click(app.offline_apply, outputs=[out, status])
+            learn_hist.click(app.offline_history, outputs=[out, status])
 
         with gr.Tab("Online learning"):
             gr.Markdown("Rolls out one task at a time, judges the group, takes "
