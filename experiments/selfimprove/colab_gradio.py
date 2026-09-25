@@ -5,8 +5,10 @@ training math and no judging logic, because those live in `grpo`, `offline`,
 `teacher` and `insight_pool`. Its one job is to wire four harness-scale
 actions to buttons and text boxes:
 
-  - **Chat**    — run one interactive session (Qwen acting, temp ~0.4) and,
-                 when it closes, bank its golden trace into the insight pool.
+  - **Chat**    — one streaming session (Qwen acting, temp ~0.4): answers
+                 appear as the model settles, and tool-less Q&A is never sent
+                 to the DeepSeek judge; sessions that used tools get graded
+                 and, when good, banked into the insight pool.
   - **Offline** — drain the pool and fine-tune on the collected goldens (the
                  button shows readiness and always works; it never blocks).
   - **Online**  — a background loop that rolls out one fixed task per
@@ -48,6 +50,7 @@ DEFAULT_GROUP_SIZE = 6       # GRPO rollouts per online task
 DEFAULT_MAX_TURNS = 4        # short episodes: small window, no compaction
 ROLLOUT_BUDGET = 4_000_000   # chars; far over budget so a rollout never compacts
 CHAT_BUDGET = 800_000        # a real chat may legitimately compact
+CHAT_MAX_TURNS = 12          # cap so a tool-spamming small model can't hang chat
 
 CHAT_SYSTEM_EXTRA = ("Answer in short prose. When the task is done, say what "
                      "you did and stop calling tools.")
@@ -149,19 +152,42 @@ class SelfLearn:
     # -- Chat tab ---------------------------------------------------------
 
     def chat(self, issue):
-        """Run one live session with the student; on close, bank its golden."""
+        """One interactive session, STREAMED: the UI shows progress lines as
+        the agent works and the answer appears the moment the model settles,
+        not only after the whole pipeline finishes.
+
+        Tool-less sessions (a plain Q&A like "introduce yourself") are shown
+        immediately and skipped by the DeepSeek judge — there is nothing to
+        learn from pure chat, and grading would just block the reply.
+        """
         try:
+            yield ("(running the acting agent…)", "—", self.status_text())
             messages, _, final = self._run_harness(
-                self.chat_dir, issue, CHAT_BUDGET, 0.4, 120,
-                enable_subagents=True, tag="chat")
-            self._last_chat = (issue, final)
+                self.chat_dir, issue, CHAT_BUDGET, 0.4, CHAT_MAX_TURNS,
+                enable_subagents=False, tag="chat")
+
+            used_tools = bool(messages and any(
+                m.get("tool_calls") for m in messages
+                if m.get("role") == "assistant"))
+            if not used_tools:
+                bank_line = ("No tools used — plain chat. Nothing graded or "
+                             "banked into the insight pool.")
+                self._note(bank_line)
+                self._last_chat = (issue, final)
+                yield final, bank_line, self.status_text()
+                return
+
+            self._note("tools used — grading the session with DeepSeek…")
+            yield final, "(grading the session with DeepSeek…)", \
+                self.status_text()
             bank = self.pool.bank(issue, messages)
             self._note(bank)
-            return final, bank, self.status_text()
+            self._last_chat = (issue, final)
+            yield final, bank, self.status_text()
         except Exception as e:
             # Never a silent no-op: the UI should SEE the failure.
             self._note(f"[chat] ERROR: {e!r}")
-            return (f"Error: {e}", f"chat failed — see `{e}`", self.status_text())
+            yield (f"Error: {e}", f"chat failed — see `{e}`", self.status_text())
 
     # -- Offline tab --------------------------------------------------------
 
@@ -311,4 +337,6 @@ def build_app(workdir=".", pool_path=None, **kwargs):
             refresh = gr.Button("Refresh status")
             refresh.click(app.status_text, outputs=status)
 
+    # Generators (streaming chat) only stream when the queue is on.
+    demo.queue()
     return app, demo
